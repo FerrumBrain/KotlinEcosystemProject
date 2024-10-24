@@ -35,12 +35,12 @@ class AppInfoPlugin : Plugin<Project> {
 
     // Get latest commit information
     private fun getLatestCommit(project: Project): String {
-        val process = ProcessBuilder(
-            "git log -1 --pretty=format:'%h - %an'"
-        )
-        val process2 = process.inheritIO().start()
-        val exitCode = process2.waitFor()
-        return process2.inputStream.bufferedReader().readText()
+        val processBuilder = ProcessBuilder("git", "log", "-1", "--pretty=format:%h by %an")
+        processBuilder.directory(project.projectDir)
+        val process = processBuilder.start()
+        val exitCode = process.waitFor()
+
+        return process.inputStream.bufferedReader().readText().trim()
     }
 }
 
