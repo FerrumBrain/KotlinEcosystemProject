@@ -103,9 +103,12 @@ object MovieHandler {
         val date = LocalDate.now()
         val filename = "movie_ids_${date.monthValue}_${date.dayOfMonth}_${date.year}.json"
         if (!Files.exists(Path(filename))) {
-            deleteOldFile(date)
-
-            downloadMoviesFile("$filename.gz")
+            try {
+                downloadMoviesFile("$filename.gz")
+                deleteOldFile(date)
+            } catch (e: Exception) {
+                // Date has changed but archive is still old
+            }
 
             unzipMoviesFile(filename)
         }
