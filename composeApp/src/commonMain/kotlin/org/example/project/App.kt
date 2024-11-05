@@ -14,10 +14,18 @@ import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.json.Json
 import androidx.compose.foundation.lazy.*
+import androidx.compose.ui.Alignment
+import io.ktor.client.engine.cio.*
+import io.ktor.client.plugins.cookies.*
+import io.ktor.http.*
+import kotlinx.coroutines.delay
 import org.jetbrains.skiko.currentNanoTime
+import java.awt.Desktop
+import java.net.URI
 
 class Repository {
-    private val client = HttpClient {
+    private val client = HttpClient(CIO) {
+        install(HttpCookies)
         install(ContentNegotiation) {
             json(Json { ignoreUnknownKeys = true })
         }
@@ -25,7 +33,6 @@ class Repository {
 
     private var moviesBatchNumber = 0
     private var booksBatchNumber = 0
-    private var eventsBatchNumber = 0
 
     suspend fun getMovies(): List<Movie> {
         val response: HttpResponse = client.get("http://$IP_ADDRESS:$SERVER_PORT/movies") {
@@ -42,10 +49,24 @@ class Repository {
         booksBatchNumber += 1
         return response.body()
     }
+
+    suspend fun loginToGoogle() {
+        client.get("http://$IP_ADDRESS:$SERVER_PORT/login")
+    }
+
+    suspend fun isLoggedIn(): Boolean {
+        return client.get("http://$IP_ADDRESS:$SERVER_PORT/status").body() as String != ""
+    }
 }
 
+sealed class LoginState {
+    object LoggedOut : LoginState()
+    data class LoggedIn(val token: String) : LoginState()
+}
+
+
 @Composable
-fun<T> InfiniteList(loadMore: suspend () -> List<T>) {
+fun <T> InfiniteList(loadMore: suspend () -> List<T>) {
     val scrollState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val visible = remember { mutableStateListOf<T>() }
@@ -115,8 +136,48 @@ fun BookItem(book: Book) {
 
 @Composable
 fun App() {
-    var currentTab by remember { mutableStateOf(0) }
+    var loginState by remember { mutableStateOf<LoginState>(LoginState.LoggedOut) }
     val repository = Repository()
+
+    when (loginState) {
+        is LoginState.LoggedOut -> LoginScreen(repository) { token ->
+            loginState = LoginState.LoggedIn(token)
+        }
+        is LoginState.LoggedIn -> MainAppContent(repository)
+    }
+}
+
+@Composable
+fun LoginScreen(repository: Repository, onLoginSuccess: (String) -> Unit) {
+    val coroutineScope = rememberCoroutineScope()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(text = "Welcome! Please log in to continue.", style = MaterialTheme.typography.h6)
+        Spacer(modifier = Modifier.height(20.dp))
+        Button(onClick = {
+            coroutineScope.launch {
+                repository.loginToGoogle()
+                Desktop.getDesktop().browse(URI("http://$IP_ADDRESS:$SERVER_PORT/login"))
+                while (!repository.isLoggedIn()) {
+                    delay(1000)
+                }
+                onLoginSuccess("token") // Call it only after successful authorization
+            }
+        }) {
+            Text("Log in with Google")
+        }
+    }
+}
+
+@Composable
+fun MainAppContent(repository: Repository) {
+    var currentTab by remember { mutableStateOf(0) }
 
     Scaffold(
         topBar = {

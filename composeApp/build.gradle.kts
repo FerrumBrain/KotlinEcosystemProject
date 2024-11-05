@@ -77,6 +77,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.androidx.material3.desktop)
     debugImplementation(compose.uiTooling)
 }
 

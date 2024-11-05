@@ -7,51 +7,154 @@ import io.ktor.client.request.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
-import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.server.sessions.*
 import io.ktor.util.*
 import io.ktor.util.cio.*
 import io.ktor.utils.io.*
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.file.Files
-import java.time.LocalDate
 import java.util.zip.GZIPInputStream
 import kotlin.io.path.Path
 import kotlinx.serialization.json.Json
-import org.example.project.MovieHandler.MovieWithoutDirector
-import org.example.project.MovieHandler.TMDBResponse
-import org.example.project.MovieHandler.TMDB_TOKEN
-import org.example.project.MovieHandler.getMovieDirector
-import org.example.project.MovieHandler.json
-import org.example.project.MovieHandler.updateMovieFile
+import io.ktor.client.plugins.contentnegotiation.*
+import io.ktor.server.html.*
+import io.ktor.server.request.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.html.*
+import kotlinx.serialization.*
+import java.time.LocalDate
+import io.ktor.client.*
+import io.ktor.client.engine.apache.*
+import io.ktor.http.*
+import io.ktor.server.application.*
+import io.ktor.server.auth.*
+import io.ktor.server.plugins.cors.routing.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import io.ktor.server.sessions.*
 
 fun main() {
     embeddedServer(Netty, port = SERVER_PORT, host = IP_ADDRESS, module = Application::module)
         .start(wait = true)
 }
 
-fun Application.module() {
-    install(ContentNegotiation) {
-        json()
+private suspend fun getSession(
+    call: ApplicationCall
+): UserSession? {
+    val userSession: UserSession? = call.sessions.get()
+    //if there is no session, redirect to login
+    if (userSession == null) {
+        val redirectUrl = URLBuilder("http://$IP_ADDRESS:8080/login").run {
+            parameters.append("redirectUrl", call.request.uri)
+            build()
+        }
+        call.respondRedirect(redirectUrl)
+        return null
     }
+    return userSession
+}
+
+fun Application.configureSecurity() {
+//    install(Authentication) {
+//        session<UserSession> {
+//            validate { session: UserSession ->
+//                // Check if the session is valid
+//                if (session.accessToken.isNotEmpty()) session else null
+//            }
+//            challenge {
+//                // What to do when authentication fails (e.g., redirect to login)
+//                call.respondRedirect("/login")
+//            }
+//        }
+//    }
+    install(Sessions) {
+        cookie<UserSession>("user_session") {
+            cookie.path = "/"
+            cookie.domain = "localhost"
+            cookie.maxAgeInSeconds = 60 * 60 // 1 hour
+            cookie.httpOnly = true
+            cookie.secure = false
+        }
+    }
+    authentication {
+        oauth("auth-oauth-google") {
+            urlProvider = { "http://$IP_ADDRESS:$SERVER_PORT/callback" }
+            providerLookup = {
+                OAuthServerSettings.OAuth2ServerSettings(
+                    name = "google",
+                    authorizeUrl = "https://accounts.google.com/o/oauth2/auth",
+                    accessTokenUrl = "https://oauth2.googleapis.com/token",
+                    clientId = System.getenv("GOOGLE_CLIENT_ID"),
+                    clientSecret = System.getenv("GOOGLE_CLIENT_SECRET"),
+                    requestMethod = HttpMethod.Post,
+                    defaultScopes = listOf("https://www.googleapis.com/auth/userinfo.profile")
+                )
+            }
+            client = HttpClient(Apache)
+        }
+    }
+
     routing {
-        route("/movies") {
-            get {
-                call.respond(MovieHandler.getMovies(call.request.queryParameters["batch"]!!.toInt()))
+        authenticate("auth-oauth-google") {
+            get("/login") {
+                call.sessions.set(UserSession("accessToken"))
+                call.respondRedirect("/callback")
+            }
+
+            get("/callback") {
+                val principal: OAuthAccessTokenResponse.OAuth2? = call.authentication.principal()
+                if (principal != null) {
+                    call.sessions.set(UserSession(principal.accessToken))
+                    call.respondText("You can close this window")
+                } else {
+                    call.respondRedirect("/login")  // Redirect back to login if authentication failed
+                }
             }
         }
-        route("/books") {
-            get {
-                call.respond(BookHandler.getBooks(call.request.queryParameters["batch"]!!.toInt()))
-            }
+    }
+}
+
+@Serializable
+data class UserSession(val accessToken: String): Principal
+
+fun Application.module() {
+    configureSecurity()
+    install(CORS) {
+        anyHost() // For development; restrict this in production to specific origins
+        allowCredentials = true // Allows cookies to be sent along with requests
+        allowHeader(HttpHeaders.ContentType)
+        allowHeader(HttpHeaders.Authorization)
+        allowMethod(HttpMethod.Get)
+        allowMethod(HttpMethod.Post)
+        allowMethod(HttpMethod.Put)
+        allowMethod(HttpMethod.Delete)
+    }
+
+    routing {
+        get("/status") {
+            val a = call.sessions.get<UserSession>()
+            call.respondText(
+                if (a == null)
+                    ""
+                else
+                    call.sessions.get<UserSession>()!!.accessToken)
+        }
+        get("/movies") {
+            val userSession: UserSession? = getSession(call)
+            if (userSession != null) call.respond(MovieHandler.getMovies(call.request.queryParameters["batch"]!!.toInt()))
+        }
+        get("/books") {
+            val userSession: UserSession? = getSession(call)
+            if (userSession != null) call.respond(BookHandler.getBooks(call.request.queryParameters["batch"]!!.toInt()))
         }
     }
 }
@@ -155,10 +258,13 @@ object BookHandler {
 
     @Serializable
     data class ListOfBooks(val books: List<Book>)
+
     @Serializable
     data class BooksList(val list_name_encoded: String)
+
     @Serializable
     data class Lists(val results: List<BooksList>)
+
     @Serializable
     data class Results(val results: ListOfBooks)
 
@@ -180,7 +286,16 @@ object BookHandler {
             }
             val jsonBooks = json.decodeFromString<Results>(response.body())
             listsIndex += 1
-            File(filename).appendText("\n${jsonBooks.results.books.joinToString("\n") { json.encodeToString(Book.serializer(), it) }}")
+            File(filename).appendText(
+                "\n${
+                    jsonBooks.results.books.joinToString("\n") {
+                        json.encodeToString(
+                            Book.serializer(),
+                            it
+                        )
+                    }
+                }"
+            )
             filenameSize += jsonBooks.results.books.size
         }
     }
